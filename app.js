@@ -2,16 +2,15 @@
 
 /* ==========================================================================
    КОНФИГ — правила MMR
+
+   Каждый навык — независимый профиль: свой MMR, ранг, серия, история
+   пропусков и дневной кап. Гармошка на x2.0 серии не даёт горловому пению
+   вообще ничего — они не делят ни очки, ни лимит минут.
    ========================================================================== */
 
 const MMR_PER_MINUTE  = 2.5;
-const DAILY_CAP       = 20;       // минут в день, дающих MMR (анти-тильт)
-const ABANDON_PENALTY = 100;      // MMR за один пропущенный день
-
-// Как считается кап:
-//   'total'     — 20 минут в день на все дисциплины вместе (так написано в спеке)
-//   'per_skill' — 20 минут в день на КАЖДУЮ дисциплину отдельно
-const CAP_MODE = 'total';
+const DAILY_CAP       = 20;       // минут в день на КАЖДЫЙ навык (анти-тильт)
+const ABANDON_PENALTY = 100;      // MMR за один пропущенный день одного навыка
 
 // Порог серии -> множитель. Проверяется сверху вниз.
 const STREAK_TIERS = [
@@ -42,7 +41,7 @@ const RANKS = [
 
 const STARS_PER_RANK = 5;
 
-// Пороги теплокарты: минут за день -> уровень заливки 0..4
+// Пороги теплокарты: минут за день (сумма по всем навыкам) -> уровень 0..4
 const HEAT_LEVELS = [
   { min: 1,  max: 10,       level: 1, label: '1–10'  },
   { min: 11, max: 20,       level: 2, label: '11–20' },
@@ -111,43 +110,74 @@ const mins = n => plural(n, 'минута', 'минуты', 'минут');
 /* ==========================================================================
    СОСТОЯНИЕ
 
-   days[ISO] = { skills: { <skillId>: { raw, counted } }, mmr }
+   skills[i]  = { id, label, short, icon, archived?,
+                  mmr, streak, bestStreak, startDate, lastPracticeDate, losses }
+     — losses: ISO -> true, пропуски ЭТОГО навыка, уже принятые (штраф снят)
+
+   days[ISO]  = { skills: { <skillId>: { raw, counted } }, mmr }
      raw     — сколько реально отзанимался (идёт в «наиграно» и в теплокарту)
-     counted — сколько ушло в MMR после капа
+     counted — сколько ушло в MMR после капа этого навыка
+     mmr     — сумма MMR, заработанного за день по всем навыкам (справочно,
+               для тултипа теплокарты; на ранги не влияет)
    ========================================================================== */
 
-function blankState() {
+function blankSkill(base) {
   return {
-    version: 2,
-    startDate: null,        // день первого зачтённого фарма
+    id: base.id,
+    label: base.label,
+    short: base.short || base.label,
+    icon: base.icon,
+    ...(base.archived ? { archived: true } : {}),
     mmr: 0,
     streak: 0,
     bestStreak: 0,
+    startDate: null,
     lastPracticeDate: null,
-    skills: DEFAULT_SKILLS.map(s => ({ ...s })),
+    losses: {},
+  };
+}
+
+function blankState() {
+  return {
+    version: 3,
+    skills: DEFAULT_SKILLS.map(s => blankSkill({ ...s })),
     days: {},
-    losses: {},             // ISO -> true (пропуск, штраф уже снят)
     log: [],
   };
 }
 
-/** Состояние v1 хранило навыки фиксированными ключами дня. Переводим в v2. */
+/**
+ * v1 -> v2: минуты навыков хранились в days[iso] фиксированными ключами.
+ * v2 -> v3: MMR/ранг/серия были ОБЩИМИ на аккаунт, теперь свои у каждого
+ * навыка. Честно разделить накопленный общий MMR по навыкам невозможно —
+ * не сохранялось, кто сколько заработал. История дней и теплокарта остаются
+ * как есть, а рейтинг каждого навыка стартует заново с нуля.
+ */
 function migrate(s) {
-  if (s.version >= 2) return s;
+  if (s.version >= 3) return s;
 
-  for (const iso of Object.keys(s.days || {})) {
-    const day = s.days[iso];
-    if (day.skills) continue;
-    const skills = {};
-    for (const id of ['harmonica', 'throat']) {
-      if (day[id]) skills[id] = { raw: day[id].raw | 0, counted: day[id].counted | 0 };
-      delete day[id];
+  if (s.version < 2) {
+    for (const iso of Object.keys(s.days || {})) {
+      const day = s.days[iso];
+      if (day.skills) continue;
+      const skills = {};
+      for (const id of ['harmonica', 'throat']) {
+        if (day[id]) skills[id] = { raw: day[id].raw | 0, counted: day[id].counted | 0 };
+        delete day[id];
+      }
+      day.skills = skills;
     }
-    day.skills = skills;
   }
 
-  s.skills = DEFAULT_SKILLS.map(x => ({ ...x }));
-  s.version = 2;
+  const prevSkills = Array.isArray(s.skills) && s.skills.length ? s.skills : DEFAULT_SKILLS;
+  s.skills = prevSkills.map(sk => blankSkill({
+    id: sk.id, label: sk.label, short: sk.short || sk.label, icon: sk.icon,
+    archived: sk.archived,
+  }));
+  delete s.mmr; delete s.streak; delete s.bestStreak;
+  delete s.startDate; delete s.lastPracticeDate; delete s.losses;
+
+  s.version = 3;
   return s;
 }
 
@@ -157,7 +187,7 @@ function loadState() {
     if (!raw) return blankState();
     const parsed = migrate(Object.assign(blankState(), JSON.parse(raw)));
     if (!Array.isArray(parsed.skills) || !parsed.skills.length) {
-      parsed.skills = DEFAULT_SKILLS.map(s => ({ ...s }));
+      parsed.skills = DEFAULT_SKILLS.map(s => blankSkill({ ...s }));
     }
     return parsed;
   } catch (err) {
@@ -183,7 +213,7 @@ const activeSkills = () => state.skills.filter(s => !s.archived);
 const skillById = id => state.skills.find(s => s.id === id);
 
 /* ==========================================================================
-   РАНГИ И ЗВЁЗДЫ
+   РАНГИ И ЗВЁЗДЫ (чистые функции: mmr/streak передаются явно)
    ========================================================================== */
 
 const rankFor = mmr => RANKS.find(r => mmr >= r.min && mmr <= r.max) || RANKS[0];
@@ -194,7 +224,7 @@ function nextRank(mmr) {
 }
 
 /**
- * Текущий ранг + звезда (1..5) + готовый тайтл вида «Герой 3».
+ * Ранг + звезда (1..5) + готовый тайтл вида «Герой 3» для данного MMR.
  *
  * Каждый ранг делится на 5 равных отрезков. Отсчёт идёт от значения ПЕРЕД
  * началом ранга, поэтому верхние границы звёзд совпадают с таблицей:
@@ -239,7 +269,7 @@ function multFor(streak) {
 }
 
 /* ==========================================================================
-   ДНИ, КАП, ПРОПУСКИ
+   ДНИ (общее хранилище минут — используется капом и теплокартой)
    ========================================================================== */
 
 function dayEntry(iso, create) {
@@ -260,36 +290,42 @@ function sumDay(iso, field) {
   return Object.values(day.skills).reduce((sum, slot) => sum + (slot[field] || 0), 0);
 }
 
-const rawOn     = iso => sumDay(iso, 'raw');
-const countedOn = iso => sumDay(iso, 'counted');
+const rawOn = iso => sumDay(iso, 'raw');   // сумма по ВСЕМ навыкам — для теплокарты
 
+/** Сколько минут этого навыка ещё дадут MMR сегодня (кап всегда свой на навык). */
 function remainingToday(skillId) {
-  const today = todayISO();
-  if (CAP_MODE === 'per_skill') {
-    const day = state.days[today];
-    const slot = day && day.skills ? day.skills[skillId] : null;
-    return Math.max(0, DAILY_CAP - (slot ? slot.counted : 0));
-  }
-  return Math.max(0, DAILY_CAP - countedOn(today));
+  const day = state.days[todayISO()];
+  const slot = day && day.skills ? day.skills[skillId] : null;
+  return Math.max(0, DAILY_CAP - (slot ? slot.counted : 0));
 }
 
-/** Суммарно наигранных минут за всё время (сырые минуты, до капа). */
+function countedToday(skillId) {
+  const day = state.days[todayISO()];
+  const slot = day && day.skills ? day.skills[skillId] : null;
+  return slot ? slot.counted : 0;
+}
+
+/** Суммарно наигранных минут за всё время, по всем навыкам (сырые, до капа). */
 const totalMinutes = () =>
   Object.keys(state.days).reduce((sum, iso) => sum + rawOn(iso), 0);
 
 const formatHours = minutes => (minutes / 60).toFixed(1);
 
-/** Дни между стартом и вчера, за которые нет ни фарма, ни принятого поражения. */
-function unsettledMisses() {
-  if (!state.startDate) return [];
+/** Дни между стартом ЭТОГО навыка и вчера, где по нему нет ни фарма, ни принятого поражения. */
+function unsettledMisses(skillId) {
+  const skill = skillById(skillId);
+  if (!skill || !skill.startDate) return [];
+
   const yesterday = shiftISO(todayISO(), -1);
-  if (daysBetween(state.startDate, yesterday) < 0) return [];
+  if (daysBetween(skill.startDate, yesterday) < 0) return [];
 
   const out = [];
-  let cursor = state.startDate;
+  let cursor = skill.startDate;
   for (let guard = 0; guard < 4000; guard++) {
     if (daysBetween(cursor, yesterday) < 0) break;
-    if (!state.days[cursor] && !state.losses[cursor]) out.push(cursor);
+    const day = state.days[cursor];
+    const practiced = !!(day && day.skills[skillId] && day.skills[skillId].raw > 0);
+    if (!practiced && !skill.losses[cursor]) out.push(cursor);
     cursor = shiftISO(cursor, 1);
   }
   return out;
@@ -304,98 +340,115 @@ function trimLog() {
    ========================================================================== */
 
 function farm(skillId, minutes) {
-  if (unsettledMisses().length) return null;   // сначала принять поражение
-
   const skill = skillById(skillId);
   if (!skill) return null;
+  if (unsettledMisses(skillId).length) return null;   // сначала принять поражение по этому навыку
 
   const today = todayISO();
-  const firstSessionToday = !state.days[today];
-  const isFirstEver = state.log.length === 0;
-  const before = getRankAndStars(state.mmr);
+  const practicedToday = !!(state.days[today] && state.days[today].skills[skillId] &&
+                             state.days[today].skills[skillId].raw > 0);
+  const isFirstEver = !state.log.some(e => e.type === 'farm' && e.skill === skillId);
+  const before = getRankAndStars(skill.mmr);
 
-  if (firstSessionToday) {
-    if (!state.startDate) state.startDate = today;
-    state.streak = state.lastPracticeDate === shiftISO(today, -1) ? state.streak + 1 : 1;
-    state.bestStreak = Math.max(state.bestStreak, state.streak);
+  if (!practicedToday) {
+    if (!skill.startDate) skill.startDate = today;
+    skill.streak = skill.lastPracticeDate === shiftISO(today, -1) ? skill.streak + 1 : 1;
+    skill.bestStreak = Math.max(skill.bestStreak, skill.streak);
   }
 
   const day     = dayEntry(today, true);
   const slot    = slotFor(day, skillId);
   const counted = Math.min(minutes, remainingToday(skillId));
-  const mult    = multFor(state.streak);
+  const mult    = multFor(skill.streak);
   const gained  = Math.round(counted * MMR_PER_MINUTE * mult);
 
   slot.raw     += minutes;
   slot.counted += counted;
-  day.mmr      += gained;
+  day.mmr      += gained;                 // справочная сумма дня по всем навыкам
 
-  state.mmr = Math.max(0, state.mmr + gained);
-  state.lastPracticeDate = today;
+  skill.mmr = Math.max(0, skill.mmr + gained);
+  skill.lastPracticeDate = today;
 
   state.log.unshift({
     ts: Date.now(), date: today, type: 'farm',
     skill: skillId, skillLabel: skill.short || skill.label, skillIcon: skill.icon,
-    minutes, counted, mult, gained, mmrAfter: state.mmr,
+    minutes, counted, mult, gained, mmrAfter: skill.mmr,
   });
   trimLog();
   saveState();
 
-  const after = getRankAndStars(state.mmr);
+  const after = getRankAndStars(skill.mmr);
 
   return {
     type: 'farm', skillId, skillLabel: skill.label,
     minutes, counted, wasted: minutes - counted,
-    mult, gained, streak: state.streak, isFirstEver,
+    mult, gained, streak: skill.streak, isFirstEver,
+    mmrAfter: skill.mmr,
     rankUp: after.rank !== before.rank,
     starUp: after.rank === before.rank && after.star > before.star,
     title: after.title,
   };
 }
 
-/** Принять N самых старых обнаруженных пропусков. */
-function settleMisses(count) {
-  const pending = unsettledMisses();
+/** Принять N самых старых обнаруженных пропусков ЭТОГО навыка. */
+function settleMisses(skillId, count) {
+  const skill = skillById(skillId);
+  if (!skill) return null;
+
+  const pending = unsettledMisses(skillId);
   const take = pending.slice(0, count);
   if (!take.length) return null;
 
   for (const iso of take) {
-    state.losses[iso] = true;
-    state.mmr = Math.max(0, state.mmr - ABANDON_PENALTY);
+    skill.losses[iso] = true;
+    skill.mmr = Math.max(0, skill.mmr - ABANDON_PENALTY);
     state.log.unshift({
       ts: Date.now(), date: iso, type: 'loss',
-      penalty: ABANDON_PENALTY, mmrAfter: state.mmr,
+      skill: skillId, skillLabel: skill.short || skill.label, skillIcon: skill.icon,
+      penalty: ABANDON_PENALTY, mmrAfter: skill.mmr,
     });
   }
 
-  state.streak = 0;
+  skill.streak = 0;
   trimLog();
   saveState();
 
-  return { type: 'loss', dates: take, total: take.length * ABANDON_PENALTY, declared: false };
+  return {
+    type: 'loss', skillId, skillLabel: skill.label,
+    dates: take, total: take.length * ABANDON_PENALTY, declared: false,
+  };
 }
 
 /**
- * Кнопка «Пропустил день». Если приложение уже обнаружило дыру в календаре —
- * закрывает самую старую из них, чтобы штраф не снялся дважды. Если дыр нет —
- * оформляет добровольный абандон по спеке: −100 MMR и серия в ноль.
+ * Кнопка «Пропустил день» для конкретного навыка. Если по нему уже
+ * обнаружена дыра в календаре — закрывает самую старую (чтобы штраф не
+ * снялся дважды). Если дыр нет — оформляет добровольный абандон на сегодня:
+ * −100 MMR и серия в ноль.
  */
-function declareSkip() {
-  if (unsettledMisses().length) return settleMisses(1);
+function declareSkip(skillId) {
+  const skill = skillById(skillId);
+  if (!skill) return null;
+  if (unsettledMisses(skillId).length) return settleMisses(skillId, 1);
 
   const today = todayISO();
-  if (!state.days[today]) state.losses[today] = true;
+  const practicedToday = !!(state.days[today] && state.days[today].skills[skillId] &&
+                             state.days[today].skills[skillId].raw > 0);
+  if (!practicedToday) skill.losses[today] = true;
 
-  state.mmr = Math.max(0, state.mmr - ABANDON_PENALTY);
-  state.streak = 0;
+  skill.mmr = Math.max(0, skill.mmr - ABANDON_PENALTY);
+  skill.streak = 0;
   state.log.unshift({
     ts: Date.now(), date: today, type: 'loss',
-    penalty: ABANDON_PENALTY, declared: true, mmrAfter: state.mmr,
+    skill: skillId, skillLabel: skill.short || skill.label, skillIcon: skill.icon,
+    penalty: ABANDON_PENALTY, declared: true, mmrAfter: skill.mmr,
   });
   trimLog();
   saveState();
 
-  return { type: 'loss', dates: [today], total: ABANDON_PENALTY, declared: true };
+  return {
+    type: 'loss', skillId, skillLabel: skill.label,
+    dates: [today], total: ABANDON_PENALTY, declared: true,
+  };
 }
 
 function addSkill(label, icon) {
@@ -403,23 +456,23 @@ function addSkill(label, icon) {
   if (!name || activeSkills().length >= MAX_SKILLS) return false;
 
   const existing = state.skills.find(s => s.label.toLowerCase() === name.toLowerCase());
-  if (existing) {                       // был убран раньше — просто возвращаем
+  if (existing) {                       // был убран раньше — возвращаем со всей статистикой
     delete existing.archived;
     saveState();
     return true;
   }
 
-  state.skills.push({
+  state.skills.push(blankSkill({
     id: 'skill_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     label: name,
     short: name,
     icon: String(icon || '').trim().slice(0, 4) || '🎯',
-  });
+  }));
   saveState();
   return true;
 }
 
-/** Навык прячется из формы, но его минуты остаются в истории и на теплокарте. */
+/** Навык прячется из активного списка, но его MMR, история и минуты остаются. */
 function archiveSkill(id) {
   const skill = skillById(id);
   if (!skill || activeSkills().length <= 1) return false;
@@ -435,7 +488,7 @@ function archiveSkill(id) {
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 
 function coachFarm(r) {
-  const info = getRankAndStars(state.mmr);
+  const info = getRankAndStars(r.mmrAfter);
 
   if (r.isFirstEver) return pick([
     'Калибровка начата. Первые три дня подряд решают, увидишь ли ты множитель вообще.',
@@ -449,11 +502,11 @@ function coachFarm(r) {
   if (r.streak === 3) return 'Три дня подряд. x1.5 активирован. Это база, а не достижение.';
 
   if (r.wasted > 0) return pick([
-    `Кап выбран, ${r.wasted} ${mins(r.wasted)} сверх лимита ушли в ноль. Связки не резина.`,
+    `Кап по «${r.skillLabel}» выбран, ${r.wasted} ${mins(r.wasted)} сверх лимита ушли в ноль.`,
     `Сверх нормы ${r.wasted} ${mins(r.wasted)}: по очкам пусто, по нагрузке минус. Завтра приходи.`,
   ]);
 
-  if (r.counted === 0) return 'Лимит на сегодня закрыт ещё раньше. Этот фарм MMR не принёс.';
+  if (r.counted === 0) return `Лимит по «${r.skillLabel}» на сегодня закрыт ещё раньше. MMR ноль.`;
 
   if (r.minutes < 5) return pick([
     `${r.minutes} ${mins(r.minutes)} — это разминка, а не матч. Фарм в пределах погрешности.`,
@@ -469,17 +522,19 @@ function coachFarm(r) {
 }
 
 function coachLoss(r) {
+  const tag = r.skillLabel ? `«${r.skillLabel}»: ` : '';
+
   if (r.declared) return pick([
-    'Пропуск засчитан с твоих слов: −100 MMR, серия в ноль. Честно — и дорого.',
-    'Абандон оформлен вручную. Минус сотня и сброс серии, отыгрывать неделю.',
+    `${tag}пропуск засчитан с твоих слов. −100 MMR, серия в ноль. Честно — и дорого.`,
+    `${tag}абандон оформлен вручную. Минус сотня и сброс серии, отыгрывать неделю.`,
   ]);
   if (r.dates.length > 1) {
-    return `Слито ${r.dates.length} ${days(r.dates.length)} подряд: −${r.total} MMR и серия в ноль. ` +
+    return `${tag}слито ${r.dates.length} ${days(r.dates.length)} подряд: −${r.total} MMR и серия в ноль. ` +
            'Отыгрывать это придётся неделями.';
   }
   return pick([
-    'Абандон зафиксирован: −100 MMR, серия обнулена. Пропуск стоит дороже, чем 20 минут практики.',
-    'День слит. Минус сотня и сброс серии — арифметика простая, выводы за тобой.',
+    `${tag}абандон зафиксирован: −100 MMR, серия обнулена.`,
+    `${tag}день слит. Минус сотня и сброс серии — арифметика простая, выводы за тобой.`,
   ]);
 }
 
@@ -491,134 +546,107 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-function renderProfile() {
-  const info = getRankAndStars(state.mmr);
-  const after = nextRank(state.mmr);
+function starsHTML(info) {
+  return Array.from({ length: info.stars }, (_, i) =>
+    `<span class="star${i < info.star ? ' on' : ''}" aria-hidden="true">★</span>`).join('');
+}
 
-  $('mmr-value').textContent = state.mmr.toLocaleString('ru-RU');
-  $('rank-ru').textContent = info.title;
-  $('rank-en').textContent = info.rank.en;
-
-  const starsBox = $('rank-stars');
-  if (info.stars) {
-    starsBox.hidden = false;
-    starsBox.innerHTML = Array.from({ length: info.stars }, (_, i) =>
-      `<span class="star${i < info.star ? ' on' : ''}" aria-hidden="true">★</span>`).join('');
-    starsBox.setAttribute('aria-label', `Звезда ${info.star} из ${info.stars}`);
-  } else {
-    starsBox.hidden = true;
-  }
-
+function renderHeader() {
   const played = totalMinutes();
   $('playtime-value').textContent = formatHours(played);
-  $('playtime-note').textContent = `${played.toLocaleString('ru-RU')} мин за всё время`;
-
-  $('progress-fill').style.width = info.pct + '%';
-  $('progress-bar').setAttribute('aria-valuenow', Math.round(info.pct));
-
-  if (info.nextLabel) {
-    $('progress-label').textContent = `До «${info.nextLabel}»`;
-    $('progress-delta').textContent = `${info.toNextStar.toLocaleString('ru-RU')} MMR`;
-  } else {
-    $('progress-label').textContent = 'Максимальный ранг';
-    $('progress-delta').textContent = '—';
-  }
-
-  $('rank-note').textContent = after
-    ? `До ранга «${after.ru}»: ${(after.min - state.mmr).toLocaleString('ru-RU')} MMR`
-    : 'Выше рангов нет';
-
-  const mult = multFor(state.streak);
-  $('streak-value').textContent = state.streak;
-  $('streak-unit').textContent  = days(state.streak);
-  const chip = $('streak-mult');
-  chip.textContent = 'x' + mult.toFixed(1);
-  chip.classList.toggle('hot', mult > 1);
-
-  $('today-value').textContent = countedOn(todayISO());
-  $('today-cap').textContent =
-    `/${CAP_MODE === 'total' ? DAILY_CAP : DAILY_CAP * activeSkills().length} мин`;
-  $('best-value').textContent = state.bestStreak;
+  $('playtime-note').textContent = `${played.toLocaleString('ru-RU')} мин суммарно`;
 }
 
-function renderAbandon() {
-  const pending = unsettledMisses();
-  const box = $('abandon');
-
-  if (!pending.length) {
-    box.hidden = true;
-    return false;
-  }
-
-  const n = pending.length;
-  box.hidden = false;
-  $('abandon-text').textContent =
-    `Пропущено ${n} ${days(n)}. Штраф −${n * ABANDON_PENALTY} MMR, серия обнуляется.`;
-
-  const shown = pending.slice(0, 12).map(fmtShort).join(' · ');
-  $('abandon-dates').textContent =
-    pending.length > 12 ? `${shown} … и ещё ${pending.length - 12}` : shown;
-
-  $('btn-settle-all').textContent = `Принять всё · −${n * ABANDON_PENALTY} MMR`;
-  $('btn-settle-one').hidden = n < 2;
-  return true;
-}
-
-function renderSkills(blocked) {
+function renderSkills() {
   const host = $('skills');
   host.innerHTML = '';
   const list = activeSkills();
 
   for (const skill of list) {
-    const left = remainingToday(skill.id);
-    const full = left === 0;
+    const info    = getRankAndStars(skill.mmr);
+    const mult    = multFor(skill.streak);
+    const pending = unsettledMisses(skill.id);
+    const blocked = pending.length > 0;
+    const left    = remainingToday(skill.id);
+    const full    = left === 0;
 
-    const el = document.createElement('div');
-    el.className = 'skill';
+    const el = document.createElement('article');
+    el.className = 'skill-card' + (blocked ? ' blocked' : '');
     el.innerHTML = `
-      <div class="skill-head">
-        <span class="skill-name"><span aria-hidden="true">${esc(skill.icon)}</span> ${esc(skill.label)}</span>
-        <span class="skill-meta">
-          <span class="skill-cap${full ? ' full' : ''}">${full ? 'кап выбран' : `осталось ${left} мин`}</span>
+      <div class="skill-card-head">
+        <div class="skill-id">
+          <span class="skill-icon" aria-hidden="true">${esc(skill.icon)}</span>
+          <div>
+            <div class="skill-name">${esc(skill.label)}</div>
+            <div class="skill-rank-line">
+              <span class="skill-rank">${esc(info.title)}</span>
+              <span class="rank-stars" aria-label="Звезда ${info.star} из ${info.stars}">${starsHTML(info)}</span>
+            </div>
+          </div>
+        </div>
+        <div class="skill-head-right">
+          <div class="skill-mmr">${skill.mmr.toLocaleString('ru-RU')}<span class="unit">MMR</span></div>
           ${list.length > 1
             ? `<button type="button" class="icon-btn" data-remove="${esc(skill.id)}"
                        title="Убрать навык" aria-label="Убрать навык ${esc(skill.label)}">✕</button>`
             : ''}
-        </span>
+        </div>
       </div>
-      <div class="skill-row">
-        <input type="number" min="1" max="600" step="1" placeholder="мин"
-               id="in-${esc(skill.id)}" aria-label="Минуты практики: ${esc(skill.label)}">
-        <span class="quick">
-          <button type="button" data-fill="5">5</button>
-          <button type="button" data-fill="10">10</button>
-          <button type="button" data-fill="15">15</button>
-          <button type="button" data-fill="20">20</button>
-        </span>
-        <button type="button" class="primary" data-commit="${esc(skill.id)}">Засчитать</button>
-      </div>`;
 
-    const input = el.querySelector('input');
-    el.querySelectorAll('[data-fill]').forEach(btn => {
-      btn.addEventListener('click', () => { input.value = btn.dataset.fill; input.focus(); });
-    });
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') commit(skill.id, input); });
-    el.querySelector('[data-commit]').addEventListener('click', () => commit(skill.id, input));
+      <div class="progress">
+        <div class="progress-meta">
+          <span>${info.nextLabel ? `До «${info.nextLabel}»` : 'Максимальный ранг'}</span>
+          <span class="progress-delta">${info.nextLabel ? info.toNextStar.toLocaleString('ru-RU') + ' MMR' : '—'}</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:${info.pct}%"></div></div>
+      </div>
 
-    const remove = el.querySelector('[data-remove]');
-    if (remove) remove.addEventListener('click', () => {
-      if (!confirm(`Убрать «${skill.label}» из списка? Наигранные минуты останутся в истории и на графике.`)) return;
-      archiveSkill(skill.id);
-      render();
-    });
+      <dl class="stats stats-compact">
+        <div class="stat">
+          <dt>Серия</dt>
+          <dd>${skill.streak} <span class="unit">дн.</span> <span class="chip${mult > 1 ? ' hot' : ''}">x${mult.toFixed(1)}</span></dd>
+        </div>
+        <div class="stat"><dt>Сегодня</dt><dd>${countedToday(skill.id)}<span class="unit">/${DAILY_CAP} мин</span></dd></div>
+        <div class="stat"><dt>Рекорд</dt><dd>${skill.bestStreak} <span class="unit">дн.</span></dd></div>
+      </dl>
 
-    if (blocked) el.querySelectorAll('input, [data-fill], [data-commit]')
-      .forEach(node => { node.disabled = true; });
+      ${blocked ? `
+        <div class="skill-abandon">
+          <p><b>Пропущено ${pending.length} ${days(pending.length)}.</b>
+             Штраф −${pending.length * ABANDON_PENALTY} MMR, серия обнулится.</p>
+          <p class="note">${pending.slice(0, 8).map(fmtShort).join(' · ')}${
+            pending.length > 8 ? ` … и ещё ${pending.length - 8}` : ''}</p>
+          <div class="skill-abandon-actions">
+            <button type="button" class="danger" data-settle-all="${esc(skill.id)}">
+              Принять всё · −${pending.length * ABANDON_PENALTY} MMR</button>
+            ${pending.length > 1
+              ? `<button type="button" class="ghost" data-settle-one="${esc(skill.id)}">Только 1 день (−100)</button>`
+              : ''}
+          </div>
+        </div>
+      ` : `
+        <div class="skill-row">
+          <input type="number" min="1" max="600" step="1" placeholder="мин"
+                 id="in-${esc(skill.id)}" aria-label="Минуты практики: ${esc(skill.label)}">
+          <span class="quick">
+            <button type="button" data-fill="5">5</button>
+            <button type="button" data-fill="10">10</button>
+            <button type="button" data-fill="15">15</button>
+            <button type="button" data-fill="20">20</button>
+          </span>
+          <button type="button" class="primary" data-commit="${esc(skill.id)}">Засчитать</button>
+        </div>
+        <div class="skill-foot">
+          <span class="skill-cap${full ? ' full' : ''}">${full ? 'кап на сегодня выбран' : `осталось ${left} мин сегодня`}</span>
+          <button type="button" class="link-btn" data-skip="${esc(skill.id)}">Пропустил день · −100 MMR</button>
+        </div>
+      `}
+    `;
 
     host.appendChild(el);
   }
 
-  $('add-skill').hidden = list.length >= MAX_SKILLS;
+  $('add-skill-card').hidden = list.length >= MAX_SKILLS;
 }
 
 function renderResult() {
@@ -637,6 +665,7 @@ function renderResult() {
 
   if (lastResult.type === 'loss') {
     const r = lastResult;
+    row('Дисциплина', r.skillLabel);
     row('Событие', r.declared ? 'Пропуск заявлен вручную' : 'Обнаружен пропуск');
     row('Дней', String(r.dates.length));
     row('Даты', r.dates.map(fmtShort).join(', '));
@@ -654,7 +683,7 @@ function renderResult() {
   }
 }
 
-/* ---------- теплокарта активности ---------- */
+/* ---------- теплокарта активности (общая, по сумме всех навыков) ---------- */
 
 function heatLevel(minutes) {
   if (minutes <= 0) return 0;
@@ -668,9 +697,9 @@ function heatRange() {
   if (period === '30d') return { from: shiftISO(today, -29), to: today };
 
   const earliest = shiftISO(today, -(MIN_ALL_DAYS - 1));
-  const from = state.startDate && daysBetween(state.startDate, earliest) > 0
-    ? state.startDate
-    : earliest;
+  const starts = state.skills.map(s => s.startDate).filter(Boolean);
+  const earliestStart = starts.length ? starts.reduce((a, b) => (daysBetween(a, b) < 0 ? a : b)) : null;
+  const from = earliestStart && daysBetween(earliestStart, earliest) > 0 ? earliestStart : earliest;
   return { from, to: today };
 }
 
@@ -682,7 +711,6 @@ function renderHeatmap() {
 
   const { from, to } = heatRange();
   const today = todayISO();
-  const pending = new Set(unsettledMisses());
   const firstMonday = mondayOf(from);
   const weeks = Math.floor(daysBetween(firstMonday, to) / 7) + 1;
 
@@ -692,9 +720,8 @@ function renderHeatmap() {
   for (let w = 0; w < weeks; w++) {
     const weekStart = shiftISO(firstMonday, w * 7);
 
-    // подпись месяца над той колонкой, где месяц сменился
-    // Подпись ставим при смене месяца, но не ближе трёх колонок к предыдущей:
-    // название шире клетки и иначе налезает на соседнее.
+    // Подпись месяца ставим при смене месяца, но не ближе трёх колонок к
+    // предыдущей: название шире клетки и иначе налезает на соседнее.
     const label = document.createElement('span');
     const month = fromISO(weekStart).getMonth();
     if (month !== lastMonth) {
@@ -734,18 +761,20 @@ function renderHeatmap() {
         }
       }
 
+      const missedSkills = state.skills.filter(s => s.losses && s.losses[iso]);
+
       let lines;
-      if (state.losses[iso]) {
+      if (missedSkills.length) {
         cell.classList.add('miss');
         cell.textContent = '✕';
-        lines = [`Пропуск · −${ABANDON_PENALTY} MMR`];
-      } else if (pending.has(iso)) {
+        lines = missedSkills.map(s => `${s.icon} ${s.label}: пропуск · −${ABANDON_PENALTY} MMR`);
+      } else if (state.skills.some(s => unsettledMisses(s.id).includes(iso))) {
         cell.classList.add('pending');
         lines = ['Пропуск, поражение не принято'];
       } else {
         cell.classList.add('h' + heatLevel(raw));
         lines = raw
-          ? [`Всего: ${raw} мин`, ...breakdown, `MMR за день: +${day.mmr}`]
+          ? [`Всего: ${raw} мин`, ...breakdown, `MMR за день (все навыки): +${day.mmr}`]
           : [iso === today ? 'Сегодня — фарма ещё нет' : 'Нет активности'];
       }
 
@@ -799,17 +828,18 @@ function renderLog() {
 
   for (const e of state.log.slice(0, 40)) {
     const tr = document.createElement('tr');
+    const icon = e.skillIcon || '🎯';
+    const name = e.skillLabel || e.skill || '';
 
     if (e.type === 'loss') {
       tr.innerHTML = `
         <td>${fmtShort(e.date)}</td>
-        <td class="loss">Abandon${e.declared ? ' (вручную)' : ''}</td>
+        <td class="loss">${esc(icon)} ${esc(name)} · Abandon${e.declared ? ' (вручную)' : ''}</td>
         <td class="num">—</td>
         <td class="num loss">−${e.penalty}</td>
         <td class="num total">${e.mmrAfter}</td>`;
     } else {
-      const label = `${e.skillIcon || '🎯'} ${e.skillLabel || e.skill}` +
-                    (e.mult > 1 ? ` · x${e.mult.toFixed(1)}` : '');
+      const label = `${icon} ${name}` + (e.mult > 1 ? ` · x${e.mult.toFixed(1)}` : '');
       const minutes = e.counted < e.minutes ? `${e.counted}/${e.minutes}` : String(e.minutes);
       tr.innerHTML = `
         <td>${fmtShort(e.date)}</td>
@@ -823,16 +853,15 @@ function renderLog() {
 }
 
 function render() {
-  const blocked = renderAbandon();
-  renderProfile();
-  renderSkills(blocked);
+  renderHeader();
+  renderSkills();
   renderResult();
   renderHeatmap();
   renderLog();
 }
 
 /* ==========================================================================
-   СОБЫТИЯ
+   СОБЫТИЯ (делегированы на #skills — карточки перерисовываются целиком)
    ========================================================================== */
 
 function commit(skillId, input) {
@@ -842,32 +871,67 @@ function commit(skillId, input) {
   const result = farm(skillId, Math.min(minutes, 600));
   if (!result) return;
   lastResult = result;
-  input.value = '';
   render();
   $('result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-$('btn-settle-all').addEventListener('click', () => {
-  const n = unsettledMisses().length;
-  if (!n) return;
-  if (!confirm(`Принять поражение за ${n} ${days(n)}? Списывается ${n * ABANDON_PENALTY} MMR, серия обнуляется.`)) return;
-  lastResult = settleMisses(n);
-  render();
+$('skills').addEventListener('click', e => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+
+  if (btn.dataset.fill) {
+    const input = btn.closest('.skill-row').querySelector('input[type="number"]');
+    input.value = btn.dataset.fill;
+    input.focus();
+    return;
+  }
+  if (btn.dataset.commit) { commit(btn.dataset.commit, $('in-' + btn.dataset.commit)); return; }
+
+  if (btn.dataset.remove) {
+    const skill = skillById(btn.dataset.remove);
+    if (skill && confirm(`Убрать «${skill.label}» из списка? MMR, ранг и история останутся — просто скроется форма ввода.`)) {
+      archiveSkill(btn.dataset.remove);
+      render();
+    }
+    return;
+  }
+
+  if (btn.dataset.settleAll) {
+    const skillId = btn.dataset.settleAll;
+    const skill = skillById(skillId);
+    const n = unsettledMisses(skillId).length;
+    if (n && confirm(`Принять поражение по «${skill.label}» за ${n} ${days(n)}? Списывается ${n * ABANDON_PENALTY} MMR, серия обнулится.`)) {
+      lastResult = settleMisses(skillId, n);
+      render();
+    }
+    return;
+  }
+
+  if (btn.dataset.settleOne) {
+    lastResult = settleMisses(btn.dataset.settleOne, 1);
+    render();
+    return;
+  }
+
+  if (btn.dataset.skip) {
+    const skillId = btn.dataset.skip;
+    const skill = skillById(skillId);
+    const question = unsettledMisses(skillId).length
+      ? `Закрыть самый старый пропуск по «${skill.label}»? −${ABANDON_PENALTY} MMR, серия обнулится.`
+      : `Отметить пропуск по «${skill.label}» сегодня? −${ABANDON_PENALTY} MMR, серия обнулится. Отменить нельзя.`;
+    if (confirm(question)) {
+      lastResult = declareSkip(skillId);
+      render();
+      $('result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
 });
 
-$('btn-settle-one').addEventListener('click', () => {
-  lastResult = settleMisses(1);
-  render();
-});
-
-$('btn-skip').addEventListener('click', () => {
-  const question = unsettledMisses().length
-    ? `Закрыть самый старый обнаруженный пропуск? −${ABANDON_PENALTY} MMR, серия обнуляется.`
-    : `Отметить пропущенный день? −${ABANDON_PENALTY} MMR, серия обнуляется. Отменить нельзя.`;
-  if (!confirm(question)) return;
-  lastResult = declareSkip();
-  render();
-  $('result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+$('skills').addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const input = e.target.closest('input[type="number"]');
+  if (!input) return;
+  commit(input.id.replace(/^in-/, ''), input);
 });
 
 $('form-skill').addEventListener('submit', e => {
@@ -889,7 +953,7 @@ $('heat-periods').addEventListener('click', e => {
 });
 
 $('btn-reset').addEventListener('click', () => {
-  if (!confirm('Сбросить весь прогресс? MMR, ранг, серия, навыки и история будут стёрты без возможности восстановления.')) return;
+  if (!confirm('Сбросить весь прогресс? MMR, ранги, серии, навыки и история будут стёрты без возможности восстановления.')) return;
   state = blankState();
   lastResult = null;
   saveState();

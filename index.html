@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MMR Tracker — трекер практики</title>
-<meta name="description" content="Рейтинговый трекер практики: MMR, ранги, звёзды, win streak.">
+<meta name="description" content="Рейтинговый трекер практики: свой MMR, ранг и звёзды на каждый навык.">
 <meta name="theme-color" content="#0d0d0d">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔️</text></svg>">
 <link rel="stylesheet" href="styles.css">
@@ -16,100 +16,29 @@
   <header class="head">
     <div>
       <h1>MMR&nbsp;Tracker</h1>
-      <p class="sub">Рейтинговый трекер практики</p>
+      <p class="sub">Свой рейтинг и ранг на каждый навык</p>
     </div>
-    <button class="ghost" id="btn-reset" type="button">Сбросить прогресс</button>
+    <div class="head-right">
+      <div class="playtime-pill">
+        <span class="playtime-value"><span id="playtime-value">0.0</span><span class="hrs">hrs</span></span>
+        <span class="playtime-note" id="playtime-note"></span>
+      </div>
+      <button class="ghost" id="btn-reset" type="button">Сбросить всё</button>
+    </div>
   </header>
 
-  <!-- ABANDON -->
-  <section class="card abandon" id="abandon" hidden>
-    <div class="abandon-head">
-      <span class="abandon-icon" aria-hidden="true">✕</span>
-      <div>
-        <h2>Abandon: пропуск зафиксирован</h2>
-        <p id="abandon-text"></p>
-      </div>
-    </div>
-    <p class="abandon-dates" id="abandon-dates"></p>
-    <div class="abandon-actions">
-      <button class="danger" id="btn-settle-all" type="button">Принять всё</button>
-      <button class="ghost" id="btn-settle-one" type="button">Только 1 день (−100)</button>
-    </div>
-    <p class="note">Пока поражение не принято, фарм заблокирован.</p>
-  </section>
+  <!-- SKILLS: каждая карточка — независимый профиль (MMR, ранг, звёзды, серия) -->
+  <section class="skills" id="skills" aria-label="Навыки"></section>
 
-  <!-- PROFILE -->
-  <section class="card profile">
-    <h2 class="card-title"><span aria-hidden="true">📊</span> Текущий профиль</h2>
-
-    <div class="profile-top">
-      <div class="rank-badge">
-        <span class="rank-ru" id="rank-ru">Рекрут 1</span>
-        <span class="rank-en" id="rank-en">Herald</span>
-        <span class="rank-stars" id="rank-stars"></span>
-      </div>
-
-      <div class="figures">
-        <div class="figure">
-          <div class="figure-value" id="mmr-value">0</div>
-          <div class="figure-label">MMR</div>
-        </div>
-        <div class="figure playtime">
-          <div class="figure-value"><span id="playtime-value">0.0</span> <span class="hrs">hrs</span></div>
-          <div class="figure-label">наиграно</div>
-          <div class="figure-note" id="playtime-note"></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="progress">
-      <div class="progress-meta">
-        <span id="progress-label">До следующей звезды</span>
-        <span class="progress-delta" id="progress-delta">—</span>
-      </div>
-      <div class="progress-track" role="progressbar" id="progress-bar"
-           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <div class="progress-fill" id="progress-fill"></div>
-      </div>
-      <p class="note" id="rank-note"></p>
-    </div>
-
-    <dl class="stats">
-      <div class="stat">
-        <dt>Серия побед</dt>
-        <dd><span id="streak-value">0</span> <span class="unit" id="streak-unit">дней</span>
-            <span class="chip" id="streak-mult">x1.0</span></dd>
-      </div>
-      <div class="stat">
-        <dt>Фарм сегодня</dt>
-        <dd><span id="today-value">0</span><span class="unit" id="today-cap">/20 мин</span></dd>
-      </div>
-      <div class="stat">
-        <dt>Рекорд серии</dt>
-        <dd><span id="best-value">0</span> <span class="unit">дн.</span></dd>
-      </div>
-    </dl>
-  </section>
-
-  <!-- MATCH -->
-  <section class="card">
-    <h2 class="card-title"><span aria-hidden="true">⚔️</span> Отчёт о матче</h2>
-
-    <div class="skills" id="skills"></div>
-
+  <section class="card add-skill-card" id="add-skill-card">
+    <h2 class="card-title">Ещё один навык?</h2>
     <form class="add-skill" id="form-skill">
       <label class="sr-only" for="new-skill-icon">Значок навыка</label>
       <input id="new-skill-icon" type="text" maxlength="4" placeholder="🎯" autocomplete="off">
       <label class="sr-only" for="new-skill-name">Название навыка</label>
       <input id="new-skill-name" type="text" maxlength="28" placeholder="Какой навык осваиваешь?" autocomplete="off">
-      <button type="submit" class="ghost">+ Добавить навык</button>
+      <button type="submit" class="ghost">+ Добавить навык · свой MMR и ранг</button>
     </form>
-    <div id="add-skill" hidden></div>
-
-    <div class="skip-row">
-      <button type="button" class="danger-ghost" id="btn-skip">Пропустил день · −100 MMR</button>
-      <span class="note">Серия обнуляется. Если приложение уже нашло пропуск — закроется он.</span>
-    </div>
   </section>
 
   <!-- RESULT -->
@@ -149,6 +78,7 @@
       <li><span class="swatch miss" aria-hidden="true">✕</span>пропуск</li>
       <li><span class="swatch dashed" aria-hidden="true"></span>не принят</li>
     </ul>
+    <p class="note">Показывает суммарную активность по всем навыкам сразу — MMR и ранги у графика общие не считаются.</p>
   </section>
 
   <!-- HISTORY -->
@@ -168,7 +98,7 @@
   </section>
 
   <footer class="foot">
-    <p>1 мин = 2,5 MMR · x1.5 от 3 дней серии · x2.0 от 7 дней · кап 20 мин/день · пропуск −100 MMR</p>
+    <p>1 мин = 2,5 MMR · x1.5 от 3 дней серии · x2.0 от 7 дней · кап 20 мин/день на каждый навык · пропуск −100 MMR</p>
     <p class="note">Данные хранятся локально в браузере (localStorage) и никуда не отправляются.</p>
   </footer>
 
